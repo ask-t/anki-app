@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { schedule, type Rating } from "@/lib/scheduling";
+import type { Rating } from "@/lib/scheduling";
 import { prioritizeCards } from "@/lib/study-order";
 
 export type Card = {
@@ -20,29 +20,21 @@ export type Card = {
   ease_factor: number;
 };
 
-const ratings: { value: Rating; label: string; key: string }[] = [
-  { value: "Again", label: "もう一度", key: "1" },
-  { value: "Hard", label: "難しい", key: "2" },
-  { value: "Good", label: "覚えた", key: "3" },
-  { value: "Easy", label: "簡単", key: "4" },
-];
-
-const emptyTally: Record<Rating, number> = { Again: 0, Hard: 0, Good: 0, Easy: 0 };
+const SESSION_SIZE = 10;
+type SwipeRating = "Again" | "Good";
 
 type Session = {
   queue: Card[];
+  remaining: Card[];
   total: number;
   done: number;
   step: number;
-  tally: Record<Rating, number>;
+  tally: Record<SwipeRating, number>;
 };
 
-function formatInterval(rating: Rating, card: Card) {
-  if (rating === "Again") return "10分";
-  const days = schedule(rating, card.repetitions, card.interval_days, card.ease_factor).interval_days;
-  if (days < 30) return `${days}日`;
-  if (days < 365) return `${Number((days / 30).toFixed(1))}ヶ月`;
-  return `${Number((days / 365).toFixed(1))}年`;
+function makeBatch(ordered: Card[]): Session {
+  const queue = ordered.slice(0, SESSION_SIZE);
+  return { queue, remaining: ordered.slice(SESSION_SIZE), total: queue.length, done: 0, step: 0, tally: { Again: 0, Good: 0 } };
 }
 
 function formatUntil(ms: number) {
@@ -109,6 +101,10 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
   const [flagPending, setFlagPending] = useState<string[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const stage = useRef<HTMLDivElement>(null);
+  const gesture = useRef<{ id: number; x: number; y: number; horizontal: boolean; vertical: boolean } | null>(null);
+  const skipClick = useRef(false);
+  const rateLock = useRef(false);
+  const [dragX, setDragX] = useState(0);
   const startButton = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -136,14 +132,24 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
     if (pool.length === 0) return;
     const queue = shuffle ? shuffled(pool) : prioritizeCards(pool);
     onSessionChange(true);
-    setSession({ queue, total: queue.length, done: 0, step: 0, tally: { ...emptyTally } });
+    setSession(makeBatch(queue));
     setRevealed(false);
     setNow(Date.now());
     window.scrollTo({ top: 0 });
     focusStage();
   }
 
+  function continueBatch() {
+    if (!session || pending > 0 || session.remaining.length === 0) return;
+    setSession(makeBatch(session.remaining));
+    setRevealed(false);
+    setDragX(0);
+    window.scrollTo({ top: 0 });
+    focusStage();
+  }
+
   function exit() {
+    if (pending > 0) return;
     setSession(null);
     onSessionChange(false);
     setRevealed(false);
@@ -152,24 +158,22 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
   }
 
   const rate = useCallback((rating: Rating) => {
-    if (!current || !revealed) return;
+    if (!current || !revealed || rateLock.current || (rating !== "Again" && rating !== "Good")) return;
+    rateLock.current = true;
     const card = current;
-    const next = schedule(rating, card.repetitions, card.interval_days, card.ease_factor);
-    const counted = rating !== "Again";
     setSession((state) => {
       if (!state) return state;
       const rest = state.queue.slice(1);
-      // Like Anki's relearning step: a forgotten card comes back later in this session.
-      if (!counted) rest.push({ ...card, ...next });
       return {
         ...state,
         queue: rest,
-        done: state.done + (counted ? 1 : 0),
+        done: state.done + 1,
         step: state.step + 1,
         tally: { ...state.tally, [rating]: state.tally[rating] + 1 },
       };
     });
     setRevealed(false);
+    setDragX(0);
     focusStage();
     setPending((count) => count + 1);
     onRate(card.id, rating)
@@ -178,12 +182,14 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
         setSession((state) => state && {
           ...state,
           queue: [...state.queue.filter((item) => item.id !== card.id), card],
-          done: state.done - (counted ? 1 : 0),
+          done: Math.max(0, state.done - 1),
           tally: { ...state.tally, [rating]: state.tally[rating] - 1 },
         });
       })
       .finally(() => setPending((count) => count - 1));
   }, [current, revealed, onRate, onNotify]);
+
+  useEffect(() => { rateLock.current = false; }, [session?.step]);
 
   useEffect(() => {
     if (!session || finished) return;
@@ -193,11 +199,10 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
       if (target instanceof Element && target.closest("input, textarea, select, a, button")) return;
       if (event.key === " " || event.key === "Enter") {
         event.preventDefault();
-        if (revealed) rate("Good");
-        else setRevealed(true);
-      } else if (revealed && ["1", "2", "3", "4"].includes(event.key)) {
+        if (!revealed) setRevealed(true);
+      } else if (revealed && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
         event.preventDefault();
-        rate(ratings[Number(event.key) - 1].value);
+        rate(event.key === "ArrowLeft" ? "Again" : "Good");
       } else if (event.key === "Escape") {
         event.preventDefault();
         exit();
@@ -223,7 +228,7 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
     return (
       <section className="study" aria-label="学習中" ref={stage} tabIndex={-1}>
         <div className="study-top">
-          <button className="btn quiet small icon-only" onClick={exit} aria-label="学習を終了">✕</button>
+          <button className="btn quiet small icon-only" onClick={exit} disabled={pending > 0} aria-label="学習を終了">✕</button>
           <div className="progress" role="progressbar" aria-label="進捗" aria-valuemin={0} aria-valuemax={session.total} aria-valuenow={session.done}>
             <span style={{ width: `${progress}%` }} />
           </div>
@@ -231,8 +236,35 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
         </div>
 
         <div className="flip-scene">
+          <div className="swipe-card" style={{ transform: `translateX(${dragX}px) rotate(${dragX / 24}deg)` }}>
           <button key={`${current.id}-${session.step}`} type="button" className={`flip-card${revealed ? " is-flipped" : ""}`}
-            aria-pressed={revealed} onClick={() => { setRevealed((value) => !value); focusStage(); }}>
+            aria-label={revealed ? "答えを表示中。左右にスワイプして評価" : "カードをタップして答えを見る"} aria-pressed={revealed}
+            onPointerDown={(event) => {
+              if (!revealed || (event.pointerType === "mouse" && event.button !== 0)) return;
+              gesture.current = { id: event.pointerId, x: event.clientX, y: event.clientY, horizontal: false, vertical: false };
+              skipClick.current = false;
+              event.currentTarget.setPointerCapture(event.pointerId);
+            }}
+            onPointerMove={(event) => {
+              const g = gesture.current;
+              if (!g || g.id !== event.pointerId) return;
+              const dx = event.clientX - g.x, dy = event.clientY - g.y;
+              if (!g.horizontal && !g.vertical && Math.max(Math.abs(dx), Math.abs(dy)) > 8) {
+                g.horizontal = Math.abs(dx) > Math.abs(dy); g.vertical = !g.horizontal;
+              }
+              if (g.horizontal) { skipClick.current = true; setDragX(dx); }
+            }}
+            onPointerUp={(event) => {
+              const g = gesture.current;
+              if (!g || g.id !== event.pointerId) return;
+              gesture.current = null;
+              const dx = event.clientX - g.x;
+              setDragX(0);
+              if (g.horizontal) setTimeout(() => { skipClick.current = false; }, 0);
+              if (g.horizontal && Math.abs(dx) >= Math.min(80, event.currentTarget.clientWidth * .22)) rate(dx < 0 ? "Again" : "Good");
+            }}
+            onPointerCancel={() => { gesture.current = null; setDragX(0); skipClick.current = false; }}
+            onClick={() => { if (skipClick.current) { skipClick.current = false; return; } setRevealed((value) => !value); focusStage(); }}>
             <span className="face face-front glass-card" aria-hidden={revealed}>
               <span className="face-label">{reverse ? "日本語" : "English"}</span>
               <span className="face-word" lang={frontLang}>{front}</span>
@@ -247,26 +279,21 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
               {current.example && <span className="face-example" lang="en">{current.example}</span>}
             </span>
           </button>
+          {revealed && Math.abs(dragX) > 16 && <span className={`swipe-indicator ${dragX < 0 ? "left" : "right"}`} aria-hidden="true">{dragX < 0 ? "もう一度" : "大丈夫"}</span>}
+          </div>
           {canSpeak && (!reverse || revealed) && <button type="button" className="speak-btn" aria-label={`${current.word}を発音`}
             onClick={() => speak(current.word)}><SpeakerIcon /></button>}
         </div>
 
-        {!revealed ? (
-          <button className="btn primary reveal-btn" onClick={() => { setRevealed(true); focusStage(); }}>
-            答えを見る<kbd>Space</kbd>
-          </button>
-        ) : (
-          <div className="rating-grid" role="group" aria-label="覚えやすさ">
-            {ratings.map(({ value, label, key }) => (
-              <button key={value} className={`rate rate-${value.toLowerCase()}`} onClick={() => rate(value)}>
-                <span className="rate-interval">{formatInterval(value, current)}</span>
-                <span className="rate-label">{label}</span>
-                <kbd>{key}</kbd>
-              </button>
-            ))}
-          </div>
-        )}
-        <p className="kbd-help muted">Space 答え / 覚えた · 1–4 評価 · Esc 終了</p>
+        <div className="swipe-hints" aria-label="カードの操作方法">
+          <span>← もう一度</span><span>大丈夫 →</span>
+        </div>
+        <p className="swipe-instruction muted">{revealed ? "カードを左右にスライド" : "カードをタップして答えを見る"}</p>
+        {revealed && <div className="swipe-alternatives" aria-label="スワイプの代わりに評価">
+          <button className="btn quiet small" onClick={() => rate("Again")}>← もう一度</button>
+          <button className="btn quiet small" onClick={() => rate("Good")}>大丈夫 →</button>
+        </div>}
+        <p className="kbd-help muted">Space 答え · ← もう一度 · → 大丈夫 · Esc 終了</p>
       </section>
     );
   }
@@ -279,16 +306,13 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
         <span className="summary-icon" aria-hidden="true">✓</span>
         <h1 id="summary-heading">お疲れさまでした</h1>
         <p className="muted">{reviewed}枚のカードを学習しました。{pending > 0 && "（保存しています…）"}</p>
-        <dl className="tally">
-          {ratings.map(({ value, label }) => (
-            <div key={value} className={`tally-item rate-${value.toLowerCase()}`}>
-              <dt>{label}</dt><dd>{session.tally[value]}</dd>
-            </div>
-          ))}
+        <dl className="tally tally-two">
+          <div className="tally-item rate-again"><dt>もう一度</dt><dd>{session.tally.Again}</dd></div>
+          <div className="tally-item rate-good"><dt>大丈夫</dt><dd>{session.tally.Good}</dd></div>
         </dl>
         <div className="summary-actions">
-          {due.length > 0 && <button className="btn primary" onClick={() => start(false)}>続けて復習（{due.length}枚）</button>}
-          <button ref={startButton} className={`btn ${due.length > 0 ? "glassy" : "primary"}`} onClick={exit}>ホームに戻る</button>
+          {session.remaining.length > 0 && <button className="btn primary" disabled={pending > 0} onClick={continueBatch}>次の{Math.min(SESSION_SIZE, session.remaining.length)}単語へ</button>}
+          <button ref={startButton} className={`btn ${session.remaining.length > 0 ? "glassy" : "primary"}`} disabled={pending > 0} onClick={exit}>ホームに戻る</button>
         </div>
       </section>
     );

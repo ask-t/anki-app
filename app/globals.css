@@ -327,3 +327,16 @@ label { font-size: 14px; font-weight: 600; color: var(--muted); }
 .flag-button.flagged { color: #d18a00; }
 .flag-button:disabled { opacity: .5; cursor: wait; }
 .flag-button:focus-visible { outline: 2px solid #3d6df2; outline-offset: -3px; border-radius: 8px; }
+
+/* Swipe movement is separate from the card's 3D flip. */
+.swipe-card { position: relative; transition: transform .16s ease-out; will-change: transform; }
+.swipe-card .flip-card { touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+.swipe-indicator { position: absolute; top: 28px; z-index: 3; padding: 6px 14px; border: 2px solid currentColor; border-radius: 12px; background: rgba(255,255,255,.92); font-weight: 700; pointer-events: none; }
+.swipe-indicator.left { right: 24px; color: var(--again); }
+.swipe-indicator.right { left: 24px; color: var(--easy); }
+.swipe-hints { display: flex; justify-content: space-between; gap: 10px; font-weight: 700; }
+.swipe-hints span:first-child { color: var(--again); }
+.swipe-hints span:last-child { color: var(--easy); }
+.swipe-instruction { text-align: center; margin: -8px 0 0; font-size: 14px; }
+.swipe-alternatives { display: flex; justify-content: space-between; gap: 12px; }
+.tally-two { grid-template-columns: repeat(2, minmax(0, 1fr)); }

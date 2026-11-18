@@ -102,7 +102,7 @@ export function LibraryDeck({ userId, cards, loading, refreshing, onRefresh, onR
       </select>
       <label htmlFor="rating-filter">前回の評価</label>
       <select className="input" id="rating-filter" value={ratingFilter} onChange={(event) => setRatingFilter(event.target.value)}>
-        <option value="all">すべての評価</option><option value="Again">もう一度</option><option value="Hard">難しい</option><option value="Good">覚えた</option><option value="Easy">簡単</option><option value="unrated">未評価</option>
+        <option value="all">すべての評価</option><option value="Again">もう一度</option><option value="Hard">難しい（以前の評価）</option><option value="Good">大丈夫（覚えた）</option><option value="Easy">簡単（以前の評価）</option><option value="unrated">未評価</option>
       </select>
       <label className="flag-filter"><input type="checkbox" checked={flaggedOnly} onChange={(event) => setFlaggedOnly(event.target.checked)} /> フラグ付きのみ</label>
     </section>}

@@ -1,28 +1,174 @@
 "use client";
-import {useEffect,useMemo,useState} from "react";
-import type {User} from "@supabase/supabase-js";
-import {browserSupabase} from "@/lib/supabase";
-type Card={id:string;word:string;japanese_meaning:string;explanation:string;example:string;part_of_speech:string|null;due_at:string;repetitions:number};
-type Rating="Again"|"Hard"|"Good"|"Easy";
-const configured=Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL&&process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
-export default function Home(){
- const supabase=useMemo(()=>configured?browserSupabase():null,[]);
- const [user,setUser]=useState<User|null>(null),[email,setEmail]=useState(""),[cards,setCards]=useState<Card[]>([]),[current,setCurrent]=useState<Card|null>(null),[revealed,setRevealed]=useState(false),[reverse,setReverse]=useState(false),[all,setAll]=useState(false),[busy,setBusy]=useState(false),[message,setMessage]=useState("");
- useEffect(()=>{if(!supabase)return;supabase.auth.getUser().then(({data})=>setUser(data.user));const {data:{subscription}}=supabase.auth.onAuthStateChange((_,session)=>setUser(session?.user??null));return()=>subscription.unsubscribe()},[supabase]);
- useEffect(()=>{if(!supabase||!user){setCards([]);return;}void supabase.from("cards").select("id,word,japanese_meaning,explanation,example,part_of_speech,due_at,repetitions").order("due_at").limit(1000).then(({data,error})=>{if(error)setMessage(error.message);else setCards(data??[])});},[supabase,user]);
- async function refresh(){if(!supabase||!user)return;const {data,error}=await supabase.from("cards").select("id,word,japanese_meaning,explanation,example,part_of_speech,due_at,repetitions").order("due_at").limit(1000);if(error)setMessage(error.message);else setCards(data??[]);}
- async function authHeader(){const {data:{session}}=await supabase!.auth.getSession();if(!session?.access_token)throw Error("ログインしてください");return {Authorization:"Bearer "+session.access_token};}
- async function login(e:React.FormEvent){e.preventDefault();if(!supabase)return;setBusy(true);const {error}=await supabase.auth.signInWithOtp({email,options:{emailRedirectTo:window.location.origin}});setMessage(error?error.message:"ログインリンクをメールに送りました");setBusy(false);}
- async function sync(){if(!supabase)return;setBusy(true);try{const res=await fetch("/api/sync",{method:"POST",headers:await authHeader()});const body=await res.json();if(!res.ok)throw Error(body.error||"同期に失敗");setMessage(body.total+"件の単語を同期しました");await refresh()}catch(e){setMessage(e instanceof Error?e.message:"同期エラー")}finally{setBusy(false)}}
- async function rate(rating:Rating){if(!current||busy)return;setBusy(true);try{const res=await fetch("/api/review",{method:"POST",headers:{...(await authHeader()),"Content-Type":"application/json"},body:JSON.stringify({cardId:current.id,rating})});const body=await res.json();if(!res.ok)throw Error(body.error||"保存失敗");setCurrent(null);setRevealed(false);await refresh()}catch(e){setMessage(e instanceof Error?e.message:"保存エラー")}finally{setBusy(false)}}
- const due=cards.filter(c=>new Date(c.due_at).getTime()<=Date.now());const pool=all?cards:due;
- return <main className="shell"><header className="top"><div><span className="tag">General Conference × English</span><h1>Tango · Conference Vocab</h1><p className="muted">Notionで管理、ここで覚える</p></div>{user&&<button className="btn ghost" onClick={()=>supabase?.auth.signOut()}>ログアウト</button>}</header>
- {!configured?<section className="panel"><h2>環境変数の設定が必要です</h2><p>.env.example に従って Supabase を接続してください。</p></section>:!user?<section className="panel"><h2>メールでログイン</h2><form onSubmit={login}><input className="input" type="email" required value={email} placeholder="you@example.com" onChange={e=>setEmail(e.target.value)}/><button className="btn" disabled={busy}>ログインリンクを送信</button></form>{message&&<p role="status">{message}</p>}</section>:<>
- <section className="panel top"><div><h2>O Be Wise</h2><p className="muted">D. Todd Christofferson · Vocabulary</p></div><button className="btn" onClick={sync} disabled={busy}>↻ Notionと同期</button></section>
- <section className="cards"><div className="stat">登録単語<strong>{cards.length}</strong></div><div className="stat">復習待ち<strong>{due.length}</strong></div><div className="stat">学習経験あり<strong>{cards.filter(c=>c.repetitions>0).length}</strong></div></section>
- {message&&<p role="status" className="panel">{message}</p>}
- <section className="panel"><div className="top"><h2>Flashcards</h2><label><input type="checkbox" checked={reverse} onChange={e=>{setReverse(e.target.checked);setRevealed(false)}}/> 日本語 → 英語</label></div><p><label><input type="checkbox" checked={all} onChange={e=>setAll(e.target.checked)}/> 復習待ち以外も練習する</label></p>
- {!current?<div style={{textAlign:"center",padding:"45px 0"}}><p>{pool.length}枚のカードが利用できます</p><button className="btn" disabled={pool.length===0} onClick={()=>{setCurrent(pool[0]);setRevealed(false)}}>学習を始める</button></div>:<><div className="flash" onClick={()=>setRevealed(!revealed)} role="button" tabIndex={0} onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();setRevealed(!revealed)}}}><small className="muted">{revealed?"ANSWER":"QUESTION"}</small><h2>{(reverse?!revealed:revealed)?current.japanese_meaning:current.word}</h2>{revealed&&<><p>{current.explanation}</p><em>{current.example}</em></>}<p className="muted">タップして{revealed?"戻る":"答えを見る"}</p></div><div className="row" style={{marginTop:18}}>{(["Again","Hard","Good","Easy"] as const).map(x=><button className="btn light" disabled={!revealed||busy} key={x} onClick={()=>rate(x)}>{x}</button>)}</div></>}
- </section><section className="panel"><h2>単語一覧</h2><p className="muted">学習履歴は回答時に自動保存されます。</p>{cards.slice(0,100).map(c=><div className="top" key={c.id} style={{padding:"10px 0",borderBottom:"1px solid #e5e8f0"}}><strong>{c.word}</strong><span>{c.japanese_meaning}</span></div>)}</section></>}
- </main>
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { User } from "@supabase/supabase-js";
+import { browserSupabase } from "@/lib/supabase";
+import { getSupabasePublicConfig } from "@/lib/supabase-config";
+import type { Card } from "./components/study-deck";
+import { LibraryDeck } from "./components/library-deck";
+import type { Rating } from "@/lib/scheduling";
+import PasswordLogin from "./components/password-login";
+
+const publicConfig = getSupabasePublicConfig();
+const configured = Boolean(publicConfig.url && publicConfig.key);
+const cardFields = "id,set_id,is_flagged,last_rating,word,japanese_meaning,explanation,example,part_of_speech,due_at,repetitions,interval_days,ease_factor";
+
+type Toast = { text: string; tone: "info" | "error" };
+
+export default function Home() {
+  const supabase = useMemo(() => configured ? browserSupabase() : null, []);
+  const [user, setUser] = useState<User | null>(null);
+  const [cards, setCards] = useState<Card[]>([]);
+  const [authLoading, setAuthLoading] = useState(configured);
+  const [cardsLoading, setCardsLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState<Toast | null>(null);
+  const actionInFlight = useRef(false);
+  const pendingSaves = useRef(new Map<string, Promise<void>>());
+
+  const notify = useCallback((text: string, tone: Toast["tone"] = "info") => setToast({ text, tone }), []);
+
+  useEffect(() => {
+    if (!toast || toast.tone === "error") return;
+    const timer = setTimeout(() => setToast(null), 3500);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  useEffect(() => {
+    if (!supabase) return;
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      setUser(session?.user ?? null);
+      setAuthLoading(false);
+      if (event === "SIGNED_OUT") {
+        setCards([]);
+        setToast(null);
+      }
+    });
+    return () => subscription.unsubscribe();
+  }, [supabase]);
+
+  const refresh = useCallback(async () => {
+    if (!supabase || !user) return;
+    const { data, error } = await supabase.from("cards").select(cardFields).order("due_at").limit(1000);
+    if (error) throw error;
+    setCards(data ?? []);
+  }, [supabase, user]);
+
+  useEffect(() => {
+    if (!supabase || !user) return;
+    let cancelled = false;
+    setCardsLoading(true);
+    void supabase.from("cards").select(cardFields).order("due_at").limit(1000).then(({ data, error }) => {
+      if (cancelled) return;
+      if (error) setToast({ text: error.message, tone: "error" });
+      else setCards(data ?? []);
+      setCardsLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [supabase, user]);
+
+  async function authHeader() {
+    const { data: { session } } = await supabase!.auth.getSession();
+    if (!session?.access_token) throw new Error("ログインしてください");
+    return { Authorization: "Bearer " + session.access_token };
+  }
+
+  async function runAction(action: () => Promise<void>) {
+    if (actionInFlight.current) return;
+    actionInFlight.current = true;
+    setBusy(true);
+    setToast(null);
+    try {
+      await action();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "通信に失敗しました。もう一度お試しください。", "error");
+    } finally {
+      actionInFlight.current = false;
+      setBusy(false);
+    }
+  }
+
+  async function reloadCards() {
+    await runAction(async () => {
+      await refresh();
+      notify("単語を更新しました");
+    });
+  }
+
+  // Reviews are saved in the background so the next card appears immediately.
+  // Saves for the same card are chained so the server sees them in order.
+  async function saveReview(cardId: string, rating: Rating): Promise<void> {
+    const previous = pendingSaves.current.get(cardId);
+    const task = (async () => {
+      if (previous) await previous.catch(() => undefined);
+      const response = await fetch("/api/review", {
+        method: "POST",
+        headers: { ...(await authHeader()), "Content-Type": "application/json" },
+        body: JSON.stringify({ cardId, rating }),
+      });
+      if (!response.headers.get("content-type")?.includes("application/json")) {
+        throw new Error("回答を保存できませんでした。もう一度お試しください。");
+      }
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "回答を保存できませんでした");
+      setCards((current) => current.map((card) => card.id === cardId ? {
+        ...card,
+        last_rating: rating,
+        due_at: body.due_at,
+        repetitions: body.repetitions ?? (rating === "Again" ? 0 : card.repetitions + 1),
+        interval_days: body.interval_days ?? card.interval_days,
+        ease_factor: body.ease_factor ?? card.ease_factor,
+      } : card));
+    })();
+    pendingSaves.current.set(cardId, task);
+    try {
+      await task;
+    } finally {
+      if (pendingSaves.current.get(cardId) === task) pendingSaves.current.delete(cardId);
+    }
+  }
+
+  return (
+    <>
+      <header className="app-bar">
+        <a className="brand" href="/" aria-label="Anki App ホーム">
+          <span className="brand-mark" aria-hidden="true" />
+          <span>Anki App</span>
+        </a>
+        {user && <nav className="app-nav" aria-label="アカウント">
+          <a className="btn quiet small" href="/connections">AI接続</a>
+          <button className="btn quiet small" disabled={busy} onClick={() => runAction(async () => {
+            const { error } = await supabase!.auth.signOut();
+            if (error) throw error;
+          })}>ログアウト</button>
+        </nav>}
+      </header>
+      <main className="shell">
+        {!configured ? (
+          <section className="glass panel">
+            <h2>環境変数の設定が必要です</h2>
+            <p>READMEの手順に従ってSupabaseを接続してください。</p>
+          </section>
+        ) : authLoading ? (
+          <p className="glass panel loading-panel" role="status"><span className="spinner" aria-hidden="true" />ログイン状態を確認しています…</p>
+        ) : !user ? (
+          <section className="glass panel login-panel">
+            <span className="brand-mark large" aria-hidden="true" />
+            <h1>おかえりなさい</h1>
+            <p className="muted">ログインして、今日の単語を復習しましょう。</p>
+            <PasswordLogin />
+          </section>
+        ) : (
+          <LibraryDeck key={user.id} userId={user.id} cards={cards} loading={cardsLoading} refreshing={busy}
+            onRefresh={reloadCards} onRate={saveReview} onNotify={notify}
+            onAssigned={(id, setId) => setCards((current) => current.map((card) => card.id === id ? { ...card, set_id: setId } : card))}
+            onFlagged={(id, flagged) => setCards((current) => current.map((card) => card.id === id ? { ...card, is_flagged: flagged } : card))} />
+        )}
+      </main>
+      {toast && <div className={`toast glass ${toast.tone}`} role={toast.tone === "error" ? "alert" : "status"}>
+        <span>{toast.text}</span>
+        <button className="toast-close" aria-label="閉じる" onClick={() => setToast(null)}>×</button>
+      </div>}
+    </>
+  );
 }

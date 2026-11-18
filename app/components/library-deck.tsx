@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { browserSupabase } from "@/lib/supabase";
-import { StudyDeck, type Card } from "./study-deck";
+import { StudyDeck, type Card, type ReviewOutcome } from "./study-deck";
 import type { Rating } from "@/lib/scheduling";
 
 type Folder = { id: string; name: string };
@@ -10,7 +10,7 @@ type SetItem = { id: string; folder_id: string; name: string };
 
 export function LibraryDeck({ userId, cards, loading, refreshing, onRefresh, onRate, onNotify, onAssigned, onFlagged }: {
   userId: string; cards: Card[]; loading: boolean; refreshing: boolean;
-  onRefresh: () => void; onRate: (id: string, rating: Rating) => Promise<void>;
+  onRefresh: () => void; onRate: (id: string, rating: Rating) => Promise<ReviewOutcome>;
   onNotify: (text: string, tone?: "info" | "error") => void;
   onAssigned: (id: string, setId: string | null) => void;
   onFlagged: (id: string, flagged: boolean) => void;
@@ -60,7 +60,7 @@ export function LibraryDeck({ userId, cards, loading, refreshing, onRefresh, onR
     finally { setBusy(false); }
   }
   const namedSets = sets.map((set) => ({ ...set, folderName: folders.find((folder) => folder.id === set.folder_id)?.name ?? "フォルダー" }));
-  const visibleCards = cards.filter((card) => (filter === "all" || (filter === "unassigned" ? !card.set_id : card.set_id === filter)) && (!flaggedOnly || card.is_flagged) && (ratingFilter === "all" || (ratingFilter === "unrated" ? !card.last_rating : card.last_rating === ratingFilter)));
+  const visibleCards = cards.filter((card) => (filter === "all" || (filter === "unassigned" ? !card.set_id : card.set_id === filter)) && (!flaggedOnly || card.is_flagged) && (ratingFilter === "all" || (ratingFilter === "unrated" ? !card.mastery_level : card.mastery_level === ratingFilter)));
   async function assign(cardId: string, setId: string | null) {
     const { data, error } = await browserSupabase().from("cards").update({ set_id: setId }).eq("id", cardId).eq("user_id", userId).select("id").single();
     if (error || !data) throw error ?? new Error("Card not found");
@@ -100,9 +100,9 @@ export function LibraryDeck({ userId, cards, loading, refreshing, onRefresh, onR
         <option value="all">すべての単語</option><option value="unassigned">未分類</option>
         {folders.map((folder) => <optgroup key={folder.id} label={folder.name}>{sets.filter((set) => set.folder_id === folder.id).map((set) => <option key={set.id} value={set.id}>{set.name}</option>)}</optgroup>)}
       </select>
-      <label htmlFor="rating-filter">前回の評価</label>
+      <label htmlFor="rating-filter">前回の習熟度</label>
       <select className="input" id="rating-filter" value={ratingFilter} onChange={(event) => setRatingFilter(event.target.value)}>
-        <option value="all">すべての評価</option><option value="Again">もう一度</option><option value="Hard">難しい（以前の評価）</option><option value="Good">大丈夫（覚えた）</option><option value="Easy">簡単（以前の評価）</option><option value="unrated">未評価</option>
+        <option value="all">すべての習熟度</option><option value="difficult">難しい</option><option value="challenging">少し難しい</option><option value="okay">まあ大丈夫</option><option value="perfect">完璧</option><option value="unrated">未分類</option>
       </select>
       <label className="flag-filter"><input type="checkbox" checked={flaggedOnly} onChange={(event) => setFlaggedOnly(event.target.checked)} /> フラグ付きのみ</label>
     </section>}

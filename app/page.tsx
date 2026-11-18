@@ -4,14 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "@supabase/supabase-js";
 import { browserSupabase } from "@/lib/supabase";
 import { getSupabasePublicConfig } from "@/lib/supabase-config";
-import type { Card } from "./components/study-deck";
+import type { Card, ReviewOutcome } from "./components/study-deck";
 import { LibraryDeck } from "./components/library-deck";
 import type { Rating } from "@/lib/scheduling";
 import PasswordLogin from "./components/password-login";
 
 const publicConfig = getSupabasePublicConfig();
 const configured = Boolean(publicConfig.url && publicConfig.key);
-const cardFields = "id,set_id,is_flagged,last_rating,word,japanese_meaning,explanation,example,part_of_speech,due_at,repetitions,interval_days,ease_factor";
+const cardFields = "id,set_id,is_flagged,last_rating,mastery_level,review_failures,last_attempts,last_reviewed_at,word,japanese_meaning,explanation,example,part_of_speech,due_at,repetitions,interval_days,ease_factor";
 
 type Toast = { text: string; tone: "info" | "error" };
 
@@ -24,7 +24,8 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
   const actionInFlight = useRef(false);
-  const pendingSaves = useRef(new Map<string, Promise<void>>());
+  const pendingSaves = useRef(new Map<string, Promise<ReviewOutcome>>());
+  const unresolvedReviews = useRef(new Map<string, { requestId: string; rating: Rating }>());
 
   const notify = useCallback((text: string, tone: Toast["tone"] = "info") => setToast({ text, tone }), []);
 
@@ -41,6 +42,7 @@ export default function Home() {
       setAuthLoading(false);
       if (event === "SIGNED_OUT") {
         setCards([]);
+        unresolvedReviews.current.clear();
         setToast(null);
       }
     });
@@ -97,32 +99,46 @@ export default function Home() {
 
   // Reviews are saved in the background so the next card appears immediately.
   // Saves for the same card are chained so the server sees them in order.
-  async function saveReview(cardId: string, rating: Rating): Promise<void> {
+  async function saveReview(cardId: string, rating: Rating): Promise<ReviewOutcome> {
     const previous = pendingSaves.current.get(cardId);
     const task = (async () => {
       if (previous) await previous.catch(() => undefined);
-      const response = await fetch("/api/review", {
-        method: "POST",
-        headers: { ...(await authHeader()), "Content-Type": "application/json" },
-        body: JSON.stringify({ cardId, rating }),
-      });
-      if (!response.headers.get("content-type")?.includes("application/json")) {
-        throw new Error("回答を保存できませんでした。もう一度お試しください。");
+      async function send(action: { requestId: string; rating: Rating }) {
+        unresolvedReviews.current.set(cardId, action);
+        const response = await fetch("/api/review", {
+          method: "POST",
+          headers: { ...(await authHeader()), "Content-Type": "application/json" },
+          body: JSON.stringify({ cardId, ...action }),
+        });
+        if (!response.headers.get("content-type")?.includes("application/json")) throw new Error("回答を保存できませんでした。");
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || "回答を保存できませんでした");
+        unresolvedReviews.current.delete(cardId);
+        return body;
       }
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error || "回答を保存できませんでした");
+      const unresolved = unresolvedReviews.current.get(cardId);
+      let body;
+      if (unresolved) {
+        body = await send(unresolved);
+        if (unresolved.rating !== rating) body = await send({ requestId: crypto.randomUUID(), rating });
+      } else body = await send({ requestId: crypto.randomUUID(), rating });
       setCards((current) => current.map((card) => card.id === cardId ? {
         ...card,
-        last_rating: rating,
+        last_rating: body.last_rating ?? rating,
+        mastery_level: body.mastery_level ?? null,
+        review_failures: body.review_failures ?? 0,
+        last_attempts: body.last_attempts ?? null,
+        last_reviewed_at: body.last_reviewed_at ?? card.last_reviewed_at,
         due_at: body.due_at,
         repetitions: body.repetitions ?? (rating === "Again" ? 0 : card.repetitions + 1),
         interval_days: body.interval_days ?? card.interval_days,
         ease_factor: body.ease_factor ?? card.ease_factor,
       } : card));
+      return { mastery_level: body.mastery_level ?? null, last_attempts: body.last_attempts ?? null };
     })();
     pendingSaves.current.set(cardId, task);
     try {
-      await task;
+      return await task;
     } finally {
       if (pendingSaves.current.get(cardId) === task) pendingSaves.current.delete(cardId);
     }

@@ -2,13 +2,18 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Rating } from "@/lib/scheduling";
-import { prioritizeCards } from "@/lib/study-order";
+import { prioritizeCards, type MasteryLevel } from "@/lib/study-order";
+import { makeBatch, answer, restoreAnswer, type StudyBatch } from "@/lib/review-session";
 
 export type Card = {
   id: string;
   set_id: string | null;
   is_flagged: boolean;
   last_rating: Rating | null;
+  mastery_level: MasteryLevel | null;
+  review_failures: number;
+  last_attempts: number | null;
+  last_reviewed_at: string | null;
   word: string;
   japanese_meaning: string;
   explanation: string;
@@ -20,22 +25,10 @@ export type Card = {
   ease_factor: number;
 };
 
+export type ReviewOutcome = { mastery_level: MasteryLevel | null; last_attempts: number | null };
+const masteryLabels: Record<MasteryLevel, string> = { difficult: "難しい", challenging: "少し難しい", okay: "まあ大丈夫", perfect: "完璧" };
 const SESSION_SIZE = 10;
-type SwipeRating = "Again" | "Good";
-
-type Session = {
-  queue: Card[];
-  remaining: Card[];
-  total: number;
-  done: number;
-  step: number;
-  tally: Record<SwipeRating, number>;
-};
-
-function makeBatch(ordered: Card[]): Session {
-  const queue = ordered.slice(0, SESSION_SIZE);
-  return { queue, remaining: ordered.slice(SESSION_SIZE), total: queue.length, done: 0, step: 0, tally: { Again: 0, Good: 0 } };
-}
+type Session = StudyBatch<Card>;
 
 function formatUntil(ms: number) {
   const minutes = ms / 60_000;
@@ -88,7 +81,7 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
   loading: boolean;
   refreshing: boolean;
   onRefresh: () => void;
-  onRate: (cardId: string, rating: Rating) => Promise<void>;
+  onRate: (cardId: string, rating: Rating) => Promise<ReviewOutcome>;
   onNotify: (text: string, tone?: "info" | "error") => void;
 }) {
   const [session, setSession] = useState<Session | null>(null);
@@ -96,6 +89,8 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
   const [reverse, setReverse] = useState(false);
   const [shuffle, setShuffle] = useState(false);
   const [pending, setPending] = useState(0);
+  const [savingIds, setSavingIds] = useState<string[]>([]);
+  const savingRef = useRef(new Set<string>());
   const [canSpeak, setCanSpeak] = useState(false);
   const [query, setQuery] = useState("");
   const [flagPending, setFlagPending] = useState<string[]>([]);
@@ -158,36 +153,29 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
   }
 
   const rate = useCallback((rating: Rating) => {
-    if (!current || !revealed || rateLock.current || (rating !== "Again" && rating !== "Good")) return;
+    if (!current || rateLock.current || savingRef.current.has(current.id) || (rating !== "Again" && rating !== "Good")) return;
     rateLock.current = true;
     const card = current;
-    setSession((state) => {
-      if (!state) return state;
-      const rest = state.queue.slice(1);
-      return {
-        ...state,
-        queue: rest,
-        done: state.done + 1,
-        step: state.step + 1,
-        tally: { ...state.tally, [rating]: state.tally[rating] + 1 },
-      };
-    });
+    savingRef.current.add(card.id);
+    setSavingIds((ids) => [...ids, card.id]);
+    setSession((state) => state && answer(state, rating));
     setRevealed(false);
     setDragX(0);
     focusStage();
     setPending((count) => count + 1);
     onRate(card.id, rating)
+      .then((outcome) => {
+        if (rating === "Good" && outcome.mastery_level && outcome.last_attempts) {
+          const level = outcome.mastery_level, attempts = outcome.last_attempts;
+          setSession((state) => state && { ...state, completed: { ...state.completed, [card.id]: { word: card.word, level, attempts } } });
+        }
+      })
       .catch((error: unknown) => {
         onNotify(`「${card.word}」の評価を保存できませんでした。もう一度出題します。${error instanceof Error ? `（${error.message}）` : ""}`, "error");
-        setSession((state) => state && {
-          ...state,
-          queue: [...state.queue.filter((item) => item.id !== card.id), card],
-          done: Math.max(0, state.done - 1),
-          tally: { ...state.tally, [rating]: state.tally[rating] - 1 },
-        });
+        setSession((state) => state && restoreAnswer(state, card, rating));
       })
-      .finally(() => setPending((count) => count - 1));
-  }, [current, revealed, onRate, onNotify]);
+      .finally(() => { savingRef.current.delete(card.id); setSavingIds((ids) => ids.filter((id) => id !== card.id)); setPending((count) => count - 1); });
+  }, [current, onRate, onNotify]);
 
   useEffect(() => { rateLock.current = false; }, [session?.step]);
 
@@ -200,7 +188,7 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
       if (event.key === " " || event.key === "Enter") {
         event.preventDefault();
         if (!revealed) setRevealed(true);
-      } else if (revealed && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         event.preventDefault();
         rate(event.key === "ArrowLeft" ? "Again" : "Good");
       } else if (event.key === "Escape") {
@@ -220,6 +208,7 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
 
   // ---------- Study session ----------
   if (session && current) {
+    const cardSaving = savingIds.includes(current.id);
     const front = reverse ? current.japanese_meaning : current.word;
     const frontLang = reverse ? "ja" : "en";
     const back = reverse ? current.word : current.japanese_meaning;
@@ -238,9 +227,9 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
         <div className="flip-scene">
           <div className="swipe-card" style={{ transform: `translateX(${dragX}px) rotate(${dragX / 24}deg)` }}>
           <button key={`${current.id}-${session.step}`} type="button" className={`flip-card${revealed ? " is-flipped" : ""}`}
-            aria-label={revealed ? "答えを表示中。左右にスワイプして評価" : "カードをタップして答えを見る"} aria-pressed={revealed}
+            aria-label={revealed ? "答えを表示中。左右にスワイプして評価" : "タップして答えを見る、または左右にスワイプして評価"} aria-pressed={revealed} aria-disabled={cardSaving}
             onPointerDown={(event) => {
-              if (!revealed || (event.pointerType === "mouse" && event.button !== 0)) return;
+              if (cardSaving || (event.pointerType === "mouse" && event.button !== 0)) return;
               gesture.current = { id: event.pointerId, x: event.clientX, y: event.clientY, horizontal: false, vertical: false };
               skipClick.current = false;
               event.currentTarget.setPointerCapture(event.pointerId);
@@ -261,7 +250,7 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
               const dx = event.clientX - g.x;
               setDragX(0);
               if (g.horizontal) setTimeout(() => { skipClick.current = false; }, 0);
-              if (g.horizontal && Math.abs(dx) >= Math.min(80, event.currentTarget.clientWidth * .22)) rate(dx < 0 ? "Again" : "Good");
+              if (g.horizontal && Math.abs(dx) >= Math.min(60, event.currentTarget.clientWidth * .17)) rate(dx < 0 ? "Again" : "Good");
             }}
             onPointerCancel={() => { gesture.current = null; setDragX(0); skipClick.current = false; }}
             onClick={() => { if (skipClick.current) { skipClick.current = false; return; } setRevealed((value) => !value); focusStage(); }}>
@@ -279,7 +268,7 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
               {current.example && <span className="face-example" lang="en">{current.example}</span>}
             </span>
           </button>
-          {revealed && Math.abs(dragX) > 16 && <span className={`swipe-indicator ${dragX < 0 ? "left" : "right"}`} aria-hidden="true">{dragX < 0 ? "もう一度" : "大丈夫"}</span>}
+          {Math.abs(dragX) > 16 && <span className={`swipe-indicator ${dragX < 0 ? "left" : "right"}`} aria-hidden="true">{dragX < 0 ? "もう一度" : "大丈夫"}</span>}
           </div>
           {canSpeak && (!reverse || revealed) && <button type="button" className="speak-btn" aria-label={`${current.word}を発音`}
             onClick={() => speak(current.word)}><SpeakerIcon /></button>}
@@ -288,11 +277,11 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
         <div className="swipe-hints" aria-label="カードの操作方法">
           <span>← もう一度</span><span>大丈夫 →</span>
         </div>
-        <p className="swipe-instruction muted">{revealed ? "カードを左右にスライド" : "カードをタップして答えを見る"}</p>
-        {revealed && <div className="swipe-alternatives" aria-label="スワイプの代わりに評価">
-          <button className="btn quiet small" onClick={() => rate("Again")}>← もう一度</button>
-          <button className="btn quiet small" onClick={() => rate("Good")}>大丈夫 →</button>
-        </div>}
+        <p className="swipe-instruction muted">{cardSaving ? "回答を保存しています…" : revealed ? "カードを左右にスライド" : "タップで答えを見る・そのままスライドもできます"}</p>
+        <div className="swipe-alternatives" aria-label="スワイプの代わりに評価">
+          <button className="btn quiet small" disabled={cardSaving} onClick={() => rate("Again")}>← もう一度</button>
+          <button className="btn quiet small" disabled={cardSaving} onClick={() => rate("Good")}>大丈夫 →</button>
+        </div>
         <p className="kbd-help muted">Space 答え · ← もう一度 · → 大丈夫 · Esc 終了</p>
       </section>
     );
@@ -305,11 +294,17 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
       <section className="glass panel summary" aria-labelledby="summary-heading" ref={stage} tabIndex={-1}>
         <span className="summary-icon" aria-hidden="true">✓</span>
         <h1 id="summary-heading">お疲れさまでした</h1>
-        <p className="muted">{reviewed}枚のカードを学習しました。{pending > 0 && "（保存しています…）"}</p>
+        <p className="muted">{reviewed}枚すべて「大丈夫」になりました。{pending > 0 && "（保存しています…）"}</p>
         <dl className="tally tally-two">
           <div className="tally-item rate-again"><dt>もう一度</dt><dd>{session.tally.Again}</dd></div>
           <div className="tally-item rate-good"><dt>大丈夫</dt><dd>{session.tally.Good}</dd></div>
         </dl>
+        {Object.keys(session.completed).length > 0 && <div className="mastery-summary">
+          <h2>今回の習熟度</h2>
+          <ul>{Object.entries(session.completed).map(([id, result]) => <li key={id}>
+            <span>{result.word}</span><span>{masteryLabels[result.level]} · {result.attempts}回</span>
+          </li>)}</ul>
+        </div>}
         <div className="summary-actions">
           {session.remaining.length > 0 && <button className="btn primary" disabled={pending > 0} onClick={continueBatch}>次の{Math.min(SESSION_SIZE, session.remaining.length)}単語へ</button>}
           <button ref={startButton} className={`btn ${session.remaining.length > 0 ? "glassy" : "primary"}`} disabled={pending > 0} onClick={exit}>ホームに戻る</button>
@@ -399,6 +394,8 @@ export function StudyDeck({ cards, loading, refreshing, onRefresh, onRate, onNot
                     </summary>
                     <div className="word-body">
                       {card.part_of_speech && <span className="chip">{card.part_of_speech}</span>}
+                      {card.mastery_level && <p>習熟度: {masteryLabels[card.mastery_level]}（{card.last_attempts}回）</p>}
+                      {card.review_failures > 0 && <p>今回の「もう一度」: {card.review_failures}回</p>}
                       <label>セット
                         <select className="input" aria-label="セット" value={card.set_id ?? ""} onChange={(event) => { void onAssign(card.id, event.target.value || null).catch(() => onNotify("セットを変更できませんでした。", "error")); }}>
                           <option value="">未分類</option>

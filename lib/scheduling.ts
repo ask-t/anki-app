@@ -1,2 +1,1 @@
-export type Rating="Again"|"Hard"|"Good"|"Easy";
-export function schedule(rating:Rating,reps:number,interval:number,ease:number,now=new Date()){let r=reps,i=interval,e=ease;if(rating==="Again"){r=0;i=0;e=Math.max(1.3,e-0.2);}else{r+=1;if(r===1)i=rating==="Easy"?4:1;else if(r===2)i=rating==="Hard"?3:6;else i=Math.max(1,Math.round(i*e*(rating==="Hard"?0.65:rating==="Easy"?1.3:1)));if(rating==="Hard")e=Math.max(1.3,e-0.15);if(rating==="Easy")e+=0.15;}const due=new Date(now.getTime()+(rating==="Again"?10/1440:i)*86400000);return {repetitions:r,interval_days:i,ease_factor:e,due_at:due.toISOString()};}
+export type Rating = "Again" | "Hard" | "Good" | "Easy";
